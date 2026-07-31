@@ -1,0 +1,13 @@
+# Goal
+float32 timeout_sec
+float32 success_radius_m
+---
+# Result
+bool succeeded
+float32 final_distance
+string message
+---
+# Feedback
+float32 distance_to_goal
+float32 heading_error
+float32 running_time_sec
