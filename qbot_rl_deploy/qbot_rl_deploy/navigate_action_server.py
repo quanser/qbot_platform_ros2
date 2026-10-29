@@ -41,7 +41,9 @@ class NavigateActionServer(Node):
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.feedback_rate_hz = float(self.declare_parameter("feedback_rate_hz", 10.0).value)
-        self.tick_rate_hz = float(100/float(self._require_key(env_cfg, ["decimation"])))
+        sim_dt = float(self._require_key(env_cfg, ["sim", "dt"]))
+        decimation = float(self._require_key(env_cfg, ["decimation"]))
+        self.tick_rate_hz = float(1.0 / (sim_dt * decimation))
         self.data_timeout_sec = float(self.declare_parameter("data_timeout_sec", 0.2).value)
         self.action_no_data_abort_sec = float(
             self.declare_parameter("action_no_data_abort_sec", 2.0).value
@@ -58,6 +60,9 @@ class NavigateActionServer(Node):
         self.publish_zero_on_missing_data = bool(
             self.declare_parameter("publish_zero_on_missing_data", True).value
         )
+        self.declare_parameter("timing_log_csv", os.path.expanduser("~/policy_planner_timing_log.csv"))
+        self.timing_log_path = self.get_parameter("timing_log_csv").get_parameter_value().string_value
+        self._init_timing_log()
 
         model_path = self.run_dir / "exported" / "policy.pt"
         if not model_path.exists():
@@ -94,7 +99,7 @@ class NavigateActionServer(Node):
 
         self.cmd_pub = self.create_publisher(Twist, self.cmd_topic, 10)
         self.scan_match_reset_cli = self.create_client(Trigger, self.scan_match_reset_service)
-        self.create_subscription(ObservationStamped, self.obs_topic, self._obs_cb, 10)
+        self.create_subscription(ObservationStamped, self.obs_topic, self._obs_cb, 1)
 
         self.action_server = ActionServer(
             self,
@@ -307,6 +312,7 @@ class NavigateActionServer(Node):
 
         obs_age_ms = obs_age_sec * 1000.0
         self.get_logger().debug(
+        self.get_logger().info(
             f"obs age: {obs_age_ms:.2f} ms | inference: {inference_ms:.2f} ms | "
             f"total: {obs_age_ms + inference_ms:.2f} ms",
             throttle_duration_sec=1.0,
@@ -315,8 +321,11 @@ class NavigateActionServer(Node):
         action = output.detach().cpu().numpy().reshape(-1)
 
         cmd = Twist()
-        cmd.linear.x = float(np.clip(action[0], -self.max_lin_vel, self.max_lin_vel))
-        cmd.angular.z = float(np.clip(action[1], -self.max_ang_vel, self.max_ang_vel))
+        # Policy outputs are normalized in [-1, 1]; scale by training-time limits.
+        norm_linear = float(np.clip(action[0], -1.0, 1.0))
+        norm_angular = float(np.clip(action[1], -1.0, 1.0))
+        cmd.linear.x = norm_linear * self.max_lin_vel
+        cmd.angular.z = norm_angular * self.max_ang_vel
         self.cmd_pub.publish(cmd)
 
         metrics = self._current_goal_metrics()

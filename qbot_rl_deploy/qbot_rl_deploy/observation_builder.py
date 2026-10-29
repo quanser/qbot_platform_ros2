@@ -10,6 +10,7 @@ import yaml
 from builtin_interfaces.msg import Time as TimeMsg
 from geometry_msgs.msg import PoseStamped
 from rclpy.node import Node
+from rclpy.qos import QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Imu, JointState, LaserScan
 
 from qbot_rl_interfaces.msg import ObservationStamped
@@ -73,12 +74,14 @@ class ObservationBuilder(Node):
         self._last_imu_stamp: Optional[TimeMsg] = None
 
         self.obs_pub = self.create_publisher(ObservationStamped, self.obs_topic, 10)
+        self.obs_pub = self.create_publisher(ObservationStamped, self.obs_topic, 1)
 
-        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, 10)
-        self.create_subscription(PoseStamped, self.goal_pose_topic, self.goal_pose_callback, 10)
-        self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 10)
-        self.create_subscription(JointState, self.joint_topic, self.joint_callback, 20)
-        self.create_subscription(Imu, self.imu_topic, self.imu_callback, 20)
+        scan_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)  # matches /scan publisher
+        self.create_subscription(LaserScan, self.scan_topic, self.scan_callback, scan_qos)
+        self.create_subscription(PoseStamped, self.goal_pose_topic, self.goal_pose_callback, 1)
+        self.create_subscription(PoseStamped, self.pose_topic, self.pose_callback, 1)
+        self.create_subscription(JointState, self.joint_topic, self.joint_callback, 2)
+        self.create_subscription(Imu, self.imu_topic, self.imu_callback, 2)
         # Observation publish event-driven from pose_callback, since
         # scan-match (/pose_estimate, ~10Hz) is the slowest required input.
         # This watchdog timer is a low-rate fallback to catch cases where pose
@@ -153,6 +156,8 @@ class ObservationBuilder(Node):
         self._last_pose_time = self._stamp_to_sec(msg.header.stamp)
         self._last_pose_stamp = self._copy_stamp(msg.header.stamp)
     
+        self._publish_observation_if_ready()
+
     def joint_callback(self, msg: JointState) -> None:
         if len(msg.velocity) < 2:
             return
@@ -171,9 +176,6 @@ class ObservationBuilder(Node):
         self._latest_lidar_norm = np.clip(ranges / self.lidar_max_range, 0.0, 1.0)
         self._last_lidar_time = self._stamp_to_sec(msg.header.stamp)
         self._last_lidar_stamp = self._copy_stamp(msg.header.stamp)
-        # /scan (~12Hz, hardware-capped) is now the slowest required input, so publish
-        # as soon as it arrives rather than waiting for the next timer tick
-        self._publish_observation_if_ready()
 
     def _scan_to_interpolated_ranges(self, msg: LaserScan) -> np.ndarray:
         ranges_in = np.asarray(msg.ranges, dtype=np.float64)

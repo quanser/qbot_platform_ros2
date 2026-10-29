@@ -26,7 +26,7 @@ class NavigateActionClient(Node):
 
         self._client = ActionClient(self, PolicyNavigate, self.action_name)
         self._goal_marker_pub = self.create_publisher(Marker, self.goal_marker_topic, 10)
-        self.create_subscription(PoseStamped, self.goal_pose_topic, self._goal_pose_cb, 10)
+        self.create_subscription(PoseStamped, self.goal_pose_topic, self._goal_pose_cb, 1)
 
         self.get_logger().info(
             "navigate_action_client started. "
@@ -36,6 +36,13 @@ class NavigateActionClient(Node):
         )
 
     def _goal_pose_cb(self, msg: PoseStamped) -> None:
+        # Non-blocking check: waiting here would stall this single-threaded executor.
+        if not self._client.server_is_ready():
+            self.get_logger().warn(
+                f"Action server '{self.action_name}' is not available. Goal ignored; click again once it is up."
+            )
+            return
+
         goal = PolicyNavigate.Goal()
         goal.timeout_sec = float(self.timeout_sec)
         goal.success_radius_m = float(self.success_radius_m)
@@ -96,7 +103,8 @@ class NavigateActionClient(Node):
         fb = feedback_msg.feedback
         self.get_logger().info(
             f"feedback: t={fb.running_time_sec:.2f}s, dist={fb.distance_to_goal:.3f}, "
-            f"heading={fb.heading_error:.3f}"
+            f"heading={fb.heading_error:.3f}",
+            throttle_duration_sec=1.0,
         )
 
     def _result_cb(self, future) -> None:
