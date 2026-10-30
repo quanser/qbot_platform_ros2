@@ -1,30 +1,34 @@
-# qbot_rl_deploy
+# qbot_platform_ros2
+
+The ROS 2 repository for QBot Platform: hardware drivers, localization, and RL policy deployment, for the physical robot and the virtual one in Quanser Interactive Labs.
 
 ROS 2 packages for deploying trained RL navigation policies on the QBot Platform.
 
 ## Overview
 
-This repo provides the ROS 2 nodes that run a trained RL mapless-navigation policy on the QBot Platform: building the policy's observation, running TorchScript inference, and executing goal-directed navigation via a ROS 2 action interface.
-
-This repo depends on sensor and pose topics published by [`qbot_hardware`](https://github.com/quanser/qbot_hardware.git) and its `qbot_localization` package (lidar, joint states, IMU, pose estimate, and the scan-match reset service). It cannot run standalone, `qbot_hardware` must be built and running in the same workspace.
-
+This repo provides the low-level ROS 2 interface to the QBot Platform: motor command, sensor interface, and localization (scan-match). It runs on the QBot's onboard Jetson and publishes the sensor and pose topics. On top of that, `qbot_rl_deploy` runs a trained RL navigation policy that uses those topics to drive the robot to a goal.
 
 ## Packages in this repo
 
 | Package | Description |
 |---|---|
-| [`qbot_rl_deploy`](./qbot_rl_deploy/README.md) | Deployment nodes for trained RL navigation policies |
-| [`qbot_rl_interfaces`](./qbot_rl_interfaces/README.md) |Custom observation message and RL policy action definitions |
+| [`qbot_hardware`](./qbot_hardware/README.md) | Motor control and sensor drivers (wheel encoders, gyro, lidar, etc.) |
+| [`qbot_localization`](./qbot_localization/README.md) | Scan-match localization and EKF sensor fusion |
+| [`qbot_rl_deploy`](./qbot_rl_deploy/README.md) | Observation builder, policy action server and client, and the navigate launch file |
+| [`qbot_rl_interfaces`](./qbot_rl_interfaces/README.md) | Custom observation and action definitions for RL navigation |
 
 ## Prerequisites
 
-- ROS 2 Humble (tested distro; no known incompatibility with other ROS 2 distros)
-- PyTorch with TorchScript support
-- [`qbot_hardware`](https://github.com/quanser/qbot_hardware.git) built and running in the same workspace
+- ROS 2 Humble, which the physical QBot Platform runs. 
+- The ROS package dependencies declared in each `package.xml` can be installed with `rosdep install --from-paths src --ignore-src -y` from the workspace root.
+- [Quanser SDK](https://github.com/quanser/quanser_sdk).
+- QUARC runtime, with `quarc_run` on `PATH`. Required to run application-specific RT models.
+- PyTorch, required by `qbot_rl_deploy`, already satisfied on hardware QBot Platform.
+- (Optional) Quanser Interactive Labs and its Python API (`qvl`), for the virtual QBot Platform.
 
 ## Getting Started
 
-Source ROS 2 Humble before building or running:
+Prior to running any ROS 2 example, source Humble in your terminal session:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -32,32 +36,43 @@ source /opt/ros/humble/setup.bash
 
 ### Build
 
-From your ROS 2 workspace root:
+Clone this repo into the `src` folder of a ROS 2 workspace, then build from the workspace root:
 
 ```bash
-colcon build --packages-select qbot_rl_interfaces qbot_rl_deploy
+mkdir -p ~/ros2_ws/src
+git clone https://github.com/quanser/qbot_platform_ros2.git ~/ros2_ws/src/qbot_platform_ros2
+cd ~/ros2_ws
+rosdep install --from-paths src --ignore-src -y
+colcon build --packages-select qbot_hardware qbot_localization qbot_rl_interfaces qbot_rl_deploy
 source install/setup.bash
 ```
 
-### Running
+### Running nodes
 
-It is recommended to launch `navigate_launch.py` on the edge device without RViz2 (default), and launch `navigate_rviz_only_launch.py` on a remote workstation on the same network.
-
-##### Run on QBot Platform:
 ```bash
-ros2 launch qbot_rl_deploy navigate.launch.py run_dir:=<path-to-trained-run-dir>
+ros2 run <package_name> <node_name>
 ```
-##### Run on Remote Workstation:
-```bash
-ros2 launch qbot_rl_deploy navigate_rviz_only.launch.py
-```
-It is also possible to run RViz2 on the QBot Platform, but this is not recommended due to the high CPU load of RViz2 and the impact on the localization nodes:
-```bash
-ros2 launch qbot_rl_deploy navigate.launch.py run_dir:=<path-to-trained-run-dir> launch_rviz:=true
-``` 
 
-Then set a goal pose in RViz2 to trigger navigation via `navigate_action_client` (or your own client calling the `policy_navigate`
-action). See [`qbot_rl_deploy`'s README](./qbot_rl_deploy/README.md) for node details, parameters, and the expected `run_dir` structure.
+Example:
+```bash
+ros2 run qbot_hardware qbot_platform_driver_interface
+```
+
+Nodes should generally run one per terminal session for development/debugging. For normal operation, use a launch file.
+
+### Running launch files
+
+```bash
+ros2 launch <package_name> <launch_file_name>.py
+```
+
+Example:
+```bash
+ros2 launch qbot_hardware qbot_platform_launch.py
+```
+
+See each package's README for the full list of nodes, topics, parameters, and launch files.
+
 
 A trained `run_dir` can be downloaded from qbot_rl_deploy [GitHub Releases](https://github.com/quanser/qbot_rl_deploy/releases)
 
