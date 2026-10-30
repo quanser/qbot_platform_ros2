@@ -2,8 +2,6 @@
 
 import time
 import threading
-import csv
-import os
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -60,9 +58,6 @@ class NavigateActionServer(Node):
         self.publish_zero_on_missing_data = bool(
             self.declare_parameter("publish_zero_on_missing_data", True).value
         )
-        self.declare_parameter("timing_log_csv", os.path.expanduser("~/policy_planner_timing_log.csv"))
-        self.timing_log_path = self.get_parameter("timing_log_csv").get_parameter_value().string_value
-        self._init_timing_log()
 
         model_path = self.run_dir / "exported" / "policy.pt"
         if not model_path.exists():
@@ -111,10 +106,10 @@ class NavigateActionServer(Node):
         )
 
         self.get_logger().info(
-            "policy_planner started. "
+            "navigate_action_server started. "
             f"run_dir={self.run_dir}, device={self.device}, "
-            f"tick_rate_hz={self.tick_rate_hz:.2f},"
-            f"reset_scan_on_terminal={self.reset_scan_on_terminal}, "
+            f"tick_rate_hz={self.tick_rate_hz:.2f}, "
+            f"reset_scan_on_terminal={self.reset_scan_on_terminal}"
         )
 
     def _load_env_config(self, run_dir: Path) -> Dict[str, Any]:
@@ -311,7 +306,6 @@ class NavigateActionServer(Node):
         inference_ms = (time.perf_counter() - t0) * 1000.0
 
         obs_age_ms = obs_age_sec * 1000.0
-        self.get_logger().debug(
         self.get_logger().info(
             f"obs age: {obs_age_ms:.2f} ms | inference: {inference_ms:.2f} ms | "
             f"total: {obs_age_ms + inference_ms:.2f} ms",

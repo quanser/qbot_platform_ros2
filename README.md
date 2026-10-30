@@ -2,7 +2,7 @@
 
 The ROS 2 repository for QBot Platform: hardware drivers, localization, and RL policy deployment, for the physical robot and the virtual one in Quanser Interactive Labs.
 
-ROS 2 packages for deploying trained RL navigation policies on the QBot Platform.
+See [CHANGELOG.md](./CHANGELOG.md) for what changed in each release.
 
 ## Overview
 
@@ -73,8 +73,9 @@ ros2 launch qbot_hardware qbot_platform_launch.py
 
 See each package's README for the full list of nodes, topics, parameters, and launch files.
 
+## Guides
 
-A trained `run_dir` can be downloaded from qbot_rl_deploy [GitHub Releases](https://github.com/quanser/qbot_rl_deploy/releases)
+- [Running RL mapless navigation](./docs/rl_mapless_navigation.md): run a trained RL navigation policy on the physical QBot Platform or in QLabs, from prerequisites to sending a goal.
 
 ## Known Limitations / Operational Notes
 

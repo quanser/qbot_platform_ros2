@@ -1,32 +1,78 @@
+import shlex
 import subprocess
 
 from launch import LaunchDescription
-from launch.actions import DeclareLaunchArgument, ExecuteProcess, LogInfo, OpaqueFunction, RegisterEventHandler, TimerAction
+from launch.actions import DeclareLaunchArgument, EmitEvent, ExecuteProcess, IncludeLaunchDescription, LogInfo, OpaqueFunction, RegisterEventHandler
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit, OnProcessStart
+from launch.event_handlers import OnProcessExit
+from launch.events import Shutdown
+from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
 
+def wait_for_localization(nodes):
+    """Start RViz only once scan_match_node publishes a pose.
 
-def exit_qbot_platform_driver_interface_cb(context):
-    subprocess.run(
-        "quarc_run -q -t tcpip://localhost:17000 qbot_platform_driver_physical",
-        shell=True,
-        capture_output=True,
-    )
+    The bringup starts QLabs, the arena, the driver, the lidar and scan_match_node in sequence, which
+    takes a while. An empty RViz window during that time looks like a fault, so a shell process waits
+    for one pose message first. The policy nodes start with the bringup so their warm-up overlaps it.
+    """
 
-def exit_ekf_scan_match_cb(context):
-    subprocess.run(
-        "quarc_run -q -t tcpip://localhost:17000 ekf_scan_match",
-        shell=True,
-        capture_output=True,
-    )
+    def setup(context):
+        if LaunchConfiguration("launch_rviz").perform(context).lower() not in ("true", "1", "yes"):
+            return []
+        pose_topic = LaunchConfiguration("pose_topic").perform(context)
+        timeout = float(LaunchConfiguration("rviz_wait_sec").perform(context))
+        # ros2 topic echo exits at once when the topic does not exist yet, so retry until it does.
+        wait_cmd = (
+            f"timeout {timeout:g} sh -c "
+            + shlex.quote('until ros2 topic echo --once "$1" > /dev/null 2>&1; do sleep 1; done')
+            + f" sh {shlex.quote(pose_topic)}"
+        )
+        wait = ExecuteProcess(cmd=[wait_cmd], shell=True, name="WaitForLocalization", output="screen")
+
+        def on_wait_exit(event, _context):
+            if event.returncode != 0:
+                return [
+                    LogInfo(msg=f"No pose on '{pose_topic}' within {timeout:g}s. Shutting down."),
+                    EmitEvent(event=Shutdown(reason="localization not publishing")),
+                ]
+            return [LogInfo(msg="Localization is up. Starting RViz.")] + nodes
+
+        return [
+            LogInfo(msg=f"Waiting for a pose on '{pose_topic}' before starting RViz."),
+            wait,
+            RegisterEventHandler(OnProcessExit(target_action=wait, on_exit=on_wait_exit)),
+        ]
+
+    return OpaqueFunction(function=setup)
+
 
 def generate_launch_description():
 
     # Declare launch arguments with default values
     declare_args = [
+        # Platform selection. 'hardware' is the physical QBot Platform, 'virtual' is QLabs.
+        DeclareLaunchArgument(
+            'platform',
+            default_value='hardware',
+            description="'hardware' for the physical QBot Platform, 'virtual' for QLabs.",
+        ),
+        # Forwarded to qbot_hardware's qbot_platform_mapless_nav_bringup_launch.py.
+        DeclareLaunchArgument('agent_type', default_value='',
+                              description="Override driver/lidar agent_type (0 virtual, 1 physical). Empty derives it from 'platform'."),
+        DeclareLaunchArgument('driver_model', default_value='true',
+                              description='Start the physical driver RT model before the nodes and stop it on exit (hardware only). Use false if it is already running.'),
+        DeclareLaunchArgument('qlabs_setup', default_value='true',
+                              description='Run the QLabs spawn script first (virtual only).'),
+        DeclareLaunchArgument('qlabs_launch', default_value='true',
+                              description='Start QLabs with qlabs_module (virtual only). Closed with the launch.'),
+        DeclareLaunchArgument('qlabs_module', default_value='Warehouse'),
+        DeclareLaunchArgument('qlabs_exe', default_value='QLabs'),
+        DeclareLaunchArgument('qlabs_host', default_value='localhost'),
+        DeclareLaunchArgument('qlabs_setup_args', default_value='',
+                              description="Extra arguments for qlabs_setup.py, e.g. '--x 1.0 --yaw-deg 180'."),
         DeclareLaunchArgument('odom_pub', default_value='true'),
         DeclareLaunchArgument('scan_tf_pub', default_value='true'),
         DeclareLaunchArgument('speed_topic', default_value='/qbot_speed_feedback'),
@@ -55,6 +101,13 @@ def generate_launch_description():
         ),
         DeclareLaunchArgument("client_timeout_sec", default_value="60.0"),
         DeclareLaunchArgument("client_success_radius_m", default_value="0.25"),
+        DeclareLaunchArgument(
+            "rviz_wait_sec",
+            default_value="300.0",
+            description="Seconds to wait for the first pose before RViz starts. The launch shuts down "
+            "if none arrives. Covers QLabs start-up, the arena setup and the driver, lidar and scan "
+            "match start.",
+        ),
     ]
 
     run_dir = LaunchConfiguration("run_dir")
@@ -68,7 +121,7 @@ def generate_launch_description():
     speed_topic = LaunchConfiguration("speed_topic")
     action_name = LaunchConfiguration("action_name")
 
-    # Policy planner
+    # navigate_action_server, navigate_action_client and RViz
     cmd_topic = LaunchConfiguration("cmd_topic")
     observation_data_timeout_sec = LaunchConfiguration("observation_data_timeout_sec")
     planner_data_timeout_sec = LaunchConfiguration("planner_data_timeout_sec")
@@ -79,86 +132,43 @@ def generate_launch_description():
     client_timeout_sec = LaunchConfiguration("client_timeout_sec")
     client_success_radius_m = LaunchConfiguration("client_success_radius_m")
 
-    driver_model_rt_executable = PathJoinSubstitution(
-        [
-            FindPackageShare("qbot_hardware"),
-            "rt_models",
-            "qbot_platform_driver_physical.rt-linux_qbot_platform",
-        ]
+    # Driver, lidar and fixed lidar frame (plus the QLabs spawn step for platform:=virtual)
+    # live in qbot_hardware so both platforms share one bringup.
+    platform_bringup = IncludeLaunchDescription(
+        PythonLaunchDescriptionSource(
+            PathJoinSubstitution([
+                FindPackageShare("qbot_hardware"),
+                "launch",
+                "qbot_platform_mapless_nav_bringup_launch.py",
+            ])
+        ),
+        launch_arguments={
+            "platform": LaunchConfiguration("platform"),
+            "agent_type": LaunchConfiguration("agent_type"),
+            "driver_model": LaunchConfiguration("driver_model"),
+            "qlabs_setup": LaunchConfiguration("qlabs_setup"),
+            "qlabs_launch": LaunchConfiguration("qlabs_launch"),
+            "qlabs_module": LaunchConfiguration("qlabs_module"),
+            "qlabs_exe": LaunchConfiguration("qlabs_exe"),
+            "qlabs_host": LaunchConfiguration("qlabs_host"),
+            "qlabs_setup_args": LaunchConfiguration("qlabs_setup_args"),
+            # scan_match_node is started by the bringup once the driver and lidar are publishing.
+            "localization": "true",
+            "odom_pub": LaunchConfiguration("odom_pub"),
+            "scan_tf_pub": LaunchConfiguration("scan_tf_pub"),
+            "speed_topic": speed_topic,
+            "imu_topic": imu_topic,
+            "scan_topic": scan_topic,
+        }.items(),
     )
 
-    rt_model_start = ExecuteProcess(
-        cmd=[
-            "quarc_run",
-            "-r -t tcpip://localhost:17000",
-            driver_model_rt_executable,
-            "-d %d -uri tcpip://%m:17001",
-        ],
-        name="QBotPlatformDriverModelStart",
-        shell=True,
-    )
-
-    ekf_scan_match_rt_executable = PathJoinSubstitution(
-        [
-            FindPackageShare("qbot_localization"),
-            "rt_models",
-            "ekf_scan_match.rt-linux_qbot_platform",
-        ]
-    )
- 
-    ekf_rt_model_start = ExecuteProcess(
-        cmd=[
-            "quarc_run",
-            "-r -t tcpip://localhost:17000",
-            ekf_scan_match_rt_executable,
-            "-d %d -uri tcpip://%m:17002",
-        ],
-        name="EkfScanMatchModelStart",
-        shell=True,
-    )
-
-    qbot_driver_node = Node(
-        package="qbot_hardware",
-        executable="qbot_platform_driver_interface",
-        name="qbot_platform_driver",
-        parameters=[{"arm_robot": True,
-                     "speed_limit_mode": 0,
-                     "body_speed_duration": 0.1}],
-    )
-
-    lidar_node = Node(
-        package="qbot_hardware",
-        executable="lidar",
-        name="lidar_node",
-    )
-
-    fixed_frame = Node(
-            package='qbot_hardware',
-            executable='fixed_lidar_frame',
-            name='fixed_lidar_frame',
-        )
-
-    localization_node = Node(
-            package='qbot_localization',
-            executable='ekf_localization_node',
-            name='ekf_localization_node',
-            parameters=[{
-                'odom_pub': LaunchConfiguration('odom_pub'),
-                'tf_pub': LaunchConfiguration('scan_tf_pub'),
-                'speed_topic': speed_topic,
-                'imu_topic': imu_topic,
-                'scan_topic': scan_topic,
-                }]
-            )
-
-    observation_node = Node(
+    observation_builder_node = Node(
         package="qbot_rl_deploy",
         executable="observation_builder",
         name="observation_builder",
         parameters=[
             {
                 "run_dir": run_dir,
-                "lidar_dim": lidar_dim,
                 "scan_topic": scan_topic,
                 "goal_pose_topic": goal_pose_topic,
                 "pose_topic": pose_topic,
@@ -170,7 +180,7 @@ def generate_launch_description():
         ],
     )
 
-    policy_server = Node(
+    navigate_server_node = Node(
         package="qbot_rl_deploy",
         executable="navigate_action_server",
         name="navigate_action_server",
@@ -186,7 +196,7 @@ def generate_launch_description():
         ],
     )
 
-    policy_client = Node(
+    navigate_client_node = Node(
         package="qbot_rl_deploy",
         executable="navigate_action_client",
         name="navigate_action_client",
@@ -209,52 +219,12 @@ def generate_launch_description():
         output="screen",
     )
 
-    start_after_rt_model = RegisterEventHandler(
-        OnProcessStart(
-            target_action=rt_model_start,
-            on_start=[
-                LogInfo(msg="RT model started. Waiting 2 seconds before starting policy stack nodes."),
-                TimerAction(
-                    period=2.0,
-                    actions=[qbot_driver_node, 
-                             lidar_node, 
-                             fixed_frame, 
-                             ekf_rt_model_start,
-                             localization_node, 
-                             observation_node, 
-                             policy_server,
-                             policy_client,
-                             rviz_node],
-                ),
-            ],
-        )
-    )
-
-    stop_rt_model_on_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=qbot_driver_node,
-            on_exit=[
-                OpaqueFunction(function=exit_qbot_platform_driver_interface_cb),
-                LogInfo(msg="Driver node exited; stopping QUARC RT model."),
-            ],
-        )
-    )
-
-    stop_ekf_model_on_exit = RegisterEventHandler(
-        OnProcessExit(
-            target_action=localization_node,
-            on_exit=[
-                OpaqueFunction(function=exit_ekf_scan_match_cb),
-                LogInfo(msg="localization_node exited; stopping ekf_scan_match RT model."),
-            ],
-        )
-    )
-    
     return LaunchDescription(
         declare_args + [
-            rt_model_start,
-            start_after_rt_model,
-            stop_rt_model_on_exit,
-            stop_ekf_model_on_exit,
+            platform_bringup,
+            observation_builder_node,
+            navigate_server_node,
+            navigate_client_node,
+            wait_for_localization([rviz_node]),
         ]
     )

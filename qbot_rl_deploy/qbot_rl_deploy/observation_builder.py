@@ -22,7 +22,7 @@ class ObservationBuilder(Node):
 
         run_dir_str = str(self.declare_parameter("run_dir", "").value)
         if run_dir_str == "":
-            raise RuntimeError("Parameter 'run_dir' is required for observation_node.")
+            raise RuntimeError("Parameter 'run_dir' is required for observation_builder.")
         self.run_dir = Path(run_dir_str).expanduser().resolve()
 
         env_cfg = self._load_env_config(self.run_dir)
@@ -40,11 +40,11 @@ class ObservationBuilder(Node):
         self.joint_topic = str(self.declare_parameter("joint_topic", "qbot_joint").value)
         self.imu_topic = str(self.declare_parameter("imu_topic", "qbot_imu").value)
         self.obs_topic = str(self.declare_parameter("obs_topic", "policy/observation").value)
-        # Fallback watchdog rate only (see subscription setup below) -- normal publishing
-        # is now triggered directly by pose_callback, not by this timer.
+        # Rate of the fallback watchdog timer only. Normal publishing is triggered by
+        # pose_callback (see subscription setup below).
         self.publish_rate_hz = 2.0
         self._last_publish_time: Optional[float] = None
-        self._min_publish_gap_sec = 0.05  # below the ~83ms pose period, so real publishes are never skipped
+        self._min_publish_gap_sec = 0.05  # below the ~100 ms pose period, so pose-triggered publishes are never skipped
         self.data_timeout_sec = float(self.declare_parameter("data_timeout_sec", 0.1).value)
 
         # Hardcoded transform from fixed_lidar_frame: base_link <- base_scan.
@@ -73,7 +73,6 @@ class ObservationBuilder(Node):
         self._last_joint_stamp: Optional[TimeMsg] = None
         self._last_imu_stamp: Optional[TimeMsg] = None
 
-        self.obs_pub = self.create_publisher(ObservationStamped, self.obs_topic, 10)
         self.obs_pub = self.create_publisher(ObservationStamped, self.obs_topic, 1)
 
         scan_qos = QoSProfile(depth=1, reliability=ReliabilityPolicy.BEST_EFFORT)  # matches /scan publisher
@@ -89,11 +88,11 @@ class ObservationBuilder(Node):
         self.create_timer(1.0 / max(self.publish_rate_hz, 1e-3), self._publish_observation_if_ready)
 
         self.get_logger().info(
-            "observation_node started. "
+            "observation_builder started. "
             f"run_dir={self.run_dir}, obs_dim={self.obs_dim}, lidar_dim={self.lidar_dim}, "
             f"scan_topic={self.scan_topic}, goal_pose_topic={self.goal_pose_topic}, pose_topic={self.pose_topic}, "
             f"joint_topic={self.joint_topic}, imu_topic={self.imu_topic}, obs_topic={self.obs_topic}, "
-            f"publish_rate_hz={self.publish_rate_hz:.1f}"
+            f"watchdog_rate_hz={self.publish_rate_hz:.1f}"
         )
 
     def _load_env_config(self, run_dir: Path) -> Dict[str, Any]:
@@ -155,7 +154,8 @@ class ObservationBuilder(Node):
         )
         self._last_pose_time = self._stamp_to_sec(msg.header.stamp)
         self._last_pose_stamp = self._copy_stamp(msg.header.stamp)
-    
+        # The scan-match pose is the slowest required input and is only available
+        # after the matcher finishes, so publish as soon as it arrives.
         self._publish_observation_if_ready()
 
     def joint_callback(self, msg: JointState) -> None:
@@ -231,7 +231,7 @@ class ObservationBuilder(Node):
     def _publish_observation_if_ready(self) -> None:
         now = self.get_clock().now().nanoseconds * 1e-9
         if (
-            # only for watchdog timer publishing 
+            # Keeps the watchdog timer from publishing right after a pose-triggered publish.
             self._last_publish_time is not None
             and (now - self._last_publish_time) < self._min_publish_gap_sec
         ):

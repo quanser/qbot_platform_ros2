@@ -7,7 +7,7 @@ package_name = 'qbot_rl_deploy'
 
 setup(
     name=package_name,
-    version='0.0.0',
+    version='0.2.0',
     packages=find_packages(exclude=['test']),
     data_files=[
         ('share/ament_index/resource_index/packages',
@@ -18,7 +18,7 @@ setup(
     ],
     install_requires=['setuptools'],
     zip_safe=True,
-    maintainer='Zinan',
+    maintainer='Zinan Cen',
     maintainer_email='zinan.cen@quanser.com',
     description='RL policy deployment nodes for QBot in ROS 2',
     license='Apache-2.0',
